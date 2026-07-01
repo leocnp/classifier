@@ -1,0 +1,11 @@
+[project]
+name = "triage-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14.3"
+dependencies = [
+    "anthropic>=0.115.0",
+    "langgraph>=1.2.7",
+    "pydantic>=2.13.4",
+]
