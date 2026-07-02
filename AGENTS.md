@@ -99,9 +99,11 @@ when running via uv from the project root, so no `PYTHONPATH` tweaking is needed
 uv run python -c "from src.classifier import mock_classify"
 ```
 
-Planned modules, built incrementally: `src/schema.py`, `src/classifier.py`,
-`src/graph.py`, `src/run.py` (+ `pyproject.toml` / lockfile). Bonus (later): a
-`retrieve` node before `classify` = RAG.
+Modules (built incrementally): `src/schema.py`, `src/classifier.py`,
+`src/knowledge.py` (RAG knowledge base + retrieval), `src/graph.py`, `src/run.py`
+(+ `pyproject.toml` / lockfile). The graph is `START -> retrieve -> classify ->
+(route) -> {auto_handle | escalate | human_review} -> END`, where `retrieve` is a
+deterministic, in-memory RAG stand-in that grounds the classifier.
 
 ## uv quick-reference
 
