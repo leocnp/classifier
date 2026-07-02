@@ -2,7 +2,10 @@
 
 Topology after this step:
 
-    START -> classify -> (router) -> { auto_handle | escalate | human_review } -> END
+    START -> retrieve -> classify -> (router) -> { auto_handle | escalate | human_review } -> END
+
+`retrieve` is the RAG step: it fetches relevant knowledge-base entries for the
+ticket and puts them in state so `classify` can ground its decision on them.
 
 The router is where two guardrails live:
 - Guardrail #2 (confidence): confidence < THRESHOLD -> human_review.
@@ -25,12 +28,13 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from src.classifier import active_mode, get_classifier
+from src.knowledge import KBDocument, retrieve
 from src.schema import Action, AuditEntry, Category, Classification, Severity
 
 # Our custom types stored in checkpoints. Declaring them explicitly lets the
 # checkpointer's msgpack serializer deserialize them without the permissive
 # "unregistered type" warning (and keeps deserialization restricted to known types).
-_CHECKPOINT_TYPES = [Category, Severity, Action, Classification, AuditEntry]
+_CHECKPOINT_TYPES = [Category, Severity, Action, Classification, AuditEntry, KBDocument]
 
 # Guardrail #2 threshold: below this confidence, defer to a human.
 CONFIDENCE_THRESHOLD = 0.6
@@ -51,13 +55,27 @@ class TriageState(BaseModel):
     ticket_text: str
     classification: Classification | None = None
     action: Action | None = None
+    retrieved_context: list[KBDocument] = Field(default_factory=list)
     audit_log: Annotated[list[AuditEntry], add] = Field(default_factory=list)
 
 
+def retrieve_node(state: TriageState) -> dict:
+    """Node (RAG): fetch relevant KB entries for the ticket.
+
+    Runs before classify and writes the results into `retrieved_context` so the
+    classifier can ground its decision. `retrieved_context` has no reducer — it is
+    a fresh overwrite each run, not an accumulation.
+    """
+    docs = retrieve(state.ticket_text)
+    ids = ", ".join(doc.id for doc in docs) or "none"
+    entry = AuditEntry(node="retrieve", message=f"retrieved {len(docs)} KB doc(s): {ids}")
+    return {"retrieved_context": docs, "audit_log": [entry]}
+
+
 def classify_node(state: TriageState) -> dict:
-    """Node: classify the ticket and record one structured audit entry."""
+    """Node: classify the ticket (grounded on retrieved context) and record an audit entry."""
     classifier = get_classifier()
-    result = classifier(state.ticket_text)
+    result = classifier(state.ticket_text, state.retrieved_context)
     entry = AuditEntry(
         node="classify",
         message=(
@@ -156,7 +174,10 @@ def build_graph() -> CompiledStateGraph:
         START
           |
           v
-       classify
+       retrieve          <- RAG: fetch KB context for the ticket
+          |
+          v
+       classify          <- grounds its decision on retrieved_context
           |
        (route)          <- Guardrails #2 & #3 decide the branch
        /  |  \\
@@ -175,12 +196,14 @@ def build_graph() -> CompiledStateGraph:
     """
     workflow = StateGraph(TriageState)
 
+    workflow.add_node("retrieve", retrieve_node)
     workflow.add_node("classify", classify_node)
     workflow.add_node("auto_handle", auto_handle_node)
     workflow.add_node("escalate", escalate_node)
     workflow.add_node("human_review", human_review_node)
 
-    workflow.add_edge(START, "classify")
+    workflow.add_edge(START, "retrieve")
+    workflow.add_edge("retrieve", "classify")
     workflow.add_conditional_edges(
         "classify",
         route,

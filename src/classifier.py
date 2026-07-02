@@ -20,13 +20,15 @@ from collections.abc import Callable
 
 import anthropic
 
+from src.knowledge import KBDocument
 from src.schema import Category, Classification, Severity, safe_parse
 
 # Haiku 4.5: fast and cheap, well suited to high-volume triage.
 _MODEL = "claude-haiku-4-5-20251001"
 
-# A classifier is any callable that maps ticket text to a validated Classification.
-Classifier = Callable[[str], Classification]
+# A classifier maps ticket text (+ optional retrieved KB context) to a
+# validated Classification.
+Classifier = Callable[[str, list[KBDocument]], Classification]
 
 
 # --- Keyword tables for the deterministic mock -----------------------------------
@@ -56,7 +58,9 @@ def _count_hits(text: str, keywords: tuple[str, ...]) -> int:
     return sum(1 for kw in keywords if kw in text)
 
 
-def mock_classify(ticket_text: str) -> Classification:
+def mock_classify(
+    ticket_text: str, context: list[KBDocument] | None = None
+) -> Classification:
     """Deterministic, offline classifier used when no API key is present.
 
     The logic is intentionally simple and reproducible so the graph can run and
@@ -69,6 +73,11 @@ def mock_classify(ticket_text: str) -> Classification:
     - confidence: high (0.85) when we matched a category, low (0.30) when we fell
                   back to OTHER — low confidence deliberately routes vague tickets
                   to human review later.
+
+    `context` is the retrieved KB material (from the retrieve node). The mock keeps
+    its decision keyword-driven for reproducibility, but records the retrieved
+    hints in the rationale so you can *see* the grounding flow through — the real
+    classifier actually feeds this context into the prompt.
     """
     text = ticket_text.lower()
 
@@ -78,26 +87,32 @@ def mock_classify(ticket_text: str) -> Classification:
 
     if best_score == 0:
         # Nothing matched: unknown ticket -> low confidence -> human review path.
-        return Classification(
-            category=Category.OTHER,
-            severity=Severity.LOW,
-            confidence=0.30,
-            rationale="No known keywords matched; needs human triage.",
+        category, severity, confidence = Category.OTHER, Severity.LOW, 0.30
+        rationale = "No known keywords matched; needs human triage."
+    else:
+        # 2) Derive severity from urgency signals.
+        if _count_hits(text, _CRITICAL_KEYWORDS) > 0:
+            severity = Severity.CRITICAL
+        elif _count_hits(text, _HIGH_KEYWORDS) > 0:
+            severity = Severity.HIGH
+        else:
+            severity = Severity.MEDIUM
+        category, confidence = best_category, 0.85
+        rationale = (
+            f"Matched {best_score} '{best_category}' keyword(s); "
+            "severity from urgency signals."
         )
 
-    # 2) Derive severity from urgency signals.
-    if _count_hits(text, _CRITICAL_KEYWORDS) > 0:
-        severity = Severity.CRITICAL
-    elif _count_hits(text, _HIGH_KEYWORDS) > 0:
-        severity = Severity.HIGH
-    else:
-        severity = Severity.MEDIUM
+    # Surface any retrieved grounding in the rationale.
+    if context:
+        hints = "; ".join(doc.hint for doc in context)
+        rationale = f"{rationale} [KB: {hints}]"
 
     return Classification(
-        category=best_category,
+        category=category,
         severity=severity,
-        confidence=0.85,
-        rationale=f"Matched {best_score} '{best_category}' keyword(s); severity from urgency signals.",
+        confidence=confidence,
+        rationale=rationale,
     )
 
 
@@ -123,7 +138,20 @@ def _build_system_prompt() -> str:
     )
 
 
-def real_classify(ticket_text: str) -> Classification:
+def _format_context(context: list[KBDocument] | None) -> str:
+    """Render retrieved KB entries as a grounding block for the prompt (RAG)."""
+    if not context:
+        return ""
+    lines = "\n".join(f"- {doc.hint}" for doc in context)
+    return (
+        "\n\nRelevant knowledge-base guidance (use it to ground your decision):\n"
+        f"{lines}"
+    )
+
+
+def real_classify(
+    ticket_text: str, context: list[KBDocument] | None = None
+) -> Classification:
     """Anthropic-backed classifier (Haiku).
 
     Prompts the model for JSON, parses it, and routes the result through
@@ -131,6 +159,9 @@ def real_classify(ticket_text: str) -> Classification:
     than trusted. Any failure — network error, refusal, invalid JSON — is caught
     and turned into the same safe low-confidence fallback, so a real-mode problem
     routes a ticket to human review instead of crashing the graph.
+
+    `context` (retrieved KB material) is appended to the system prompt so the
+    model's decision is grounded — this is the "augmented" in RAG.
     """
     # anthropic.Anthropic() reads ANTHROPIC_API_KEY from the environment.
     client = anthropic.Anthropic()
@@ -138,7 +169,7 @@ def real_classify(ticket_text: str) -> Classification:
         response = client.messages.create(
             model=_MODEL,
             max_tokens=512,
-            system=_build_system_prompt(),
+            system=_build_system_prompt() + _format_context(context),
             messages=[{"role": "user", "content": ticket_text}],
         )
         if response.stop_reason == "refusal":
