@@ -80,10 +80,19 @@ All changes go through pull requests — nothing is committed directly to `main`
 - Before writing any Anthropic API code, consult the current Claude API reference
   (model IDs / params change) rather than relying on memory.
 
-## Planned deliverables
+## Layout & deliverables
 
-`schema.py`, `classifier.py`, `graph.py`, `run.py` (+ `pyproject.toml` / lockfile),
-built incrementally. Bonus (later): a `retrieve` node before `classify` = RAG.
+Application code lives under `src/`. Modules are imported with the `src.` prefix
+(e.g. `from src.schema import ...`); the repository root is already on `sys.path`
+when running via uv from the project root, so no `PYTHONPATH` tweaking is needed:
+
+```
+uv run python -c "from src.classifier import mock_classify"
+```
+
+Planned modules, built incrementally: `src/schema.py`, `src/classifier.py`,
+`src/graph.py`, `src/run.py` (+ `pyproject.toml` / lockfile). Bonus (later): a
+`retrieve` node before `classify` = RAG.
 
 ## uv quick-reference
 
