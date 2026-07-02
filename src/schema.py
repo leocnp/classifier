@@ -63,6 +63,17 @@ class Classification(BaseModel):
     rationale: str = ""
 
 
+class AuditEntry(BaseModel):
+    """One line of the audit trail (the observability seed).
+
+    A structured, typed record — instead of a raw string — so the trail can be
+    inspected, filtered, or serialized later. Each node that acts appends one.
+    """
+
+    node: str       # which node wrote this entry (e.g. "classify")
+    message: str    # what it decided and why
+
+
 def safe_parse(raw: object) -> Classification:
     """Validate arbitrary data into a Classification, never raising.
 
