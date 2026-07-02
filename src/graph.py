@@ -9,14 +9,18 @@ The router is where two guardrails live:
 - Guardrail #3 (business rule): a `critical` ticket is never auto-handled -> escalate.
 
 Each destination node records a structured audit entry and sets the final `action`.
-`human_review` is a simple stub for now; it becomes a real human-in-the-loop pause
-(interrupt + checkpointer) in the next step.
+`human_review` is a real human-in-the-loop pause: it calls `interrupt()` to suspend
+the graph and is resumed with `Command(resume=<decision>)`. This requires compiling
+with a checkpointer (MemorySaver), and every invoke must pass a `thread_id`.
 """
 
 from operator import add
 from typing import Annotated
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from src.classifier import active_mode, get_classifier
@@ -100,21 +104,47 @@ def escalate_node(state: TriageState) -> dict:
 
 
 def human_review_node(state: TriageState) -> dict:
-    """Terminal node (stub): flag for a human because confidence is low.
+    """Terminal node: pause for a human because confidence is low (HITL).
 
-    For now this only records the decision. In the next step it becomes a genuine
-    human-in-the-loop pause using `interrupt()` + a checkpointer.
+    `interrupt(payload)` suspends the graph mid-node and surfaces `payload` to the
+    caller. Execution stops here; the compiled graph must have a checkpointer so
+    the paused state can be saved and later resumed on the same thread_id.
+
+    When the caller resumes with `Command(resume=<value>)`, THIS SAME NODE re-runs
+    from the top and `interrupt(...)` returns `<value>` (it does not raise). So we
+    receive the human's decision as the return value and act on it.
+
+    Contract with the human: resume with an Action string — "auto_handle" or
+    "escalate". Anything unrecognized defaults to the safe choice, escalate.
     """
+    classification = state.classification
+
+    # Suspend and surface the proposed classification for a human to judge.
+    human_decision = interrupt(
+        {
+            "reason": f"confidence {classification.confidence:.2f} < {CONFIDENCE_THRESHOLD}",
+            "proposed_classification": classification.model_dump(mode="json"),
+            "instructions": "Resume with an Action: 'auto_handle' or 'escalate'.",
+        }
+    )
+
+    # Coerce the human's decision into a typed Action; escalate is the safe fallback.
+    try:
+        action = Action(human_decision)
+    except ValueError:
+        action = Action.ESCALATE
+
     entry = AuditEntry(
         node="human_review",
-        message=f"Flagged for human review: confidence "
-                f"{state.classification.confidence:.2f} < {CONFIDENCE_THRESHOLD} "
-                f"(HITL pause added next step).",
+        message=(
+            f"Human reviewed low-confidence ticket "
+            f"({classification.confidence:.2f}) and chose: {action}."
+        ),
     )
-    return {"action": Action.HUMAN_REVIEW, "audit_log": [entry]}
+    return {"action": action, "audit_log": [entry]}
 
 
-def build_graph():
+def build_graph() -> CompiledStateGraph:
     """Assemble and compile the graph with conditional routing.
 
         START
@@ -154,9 +184,13 @@ def build_graph():
             Action.HUMAN_REVIEW: "human_review",
         },
     )
-    # Every destination is terminal for now.
+    # Every destination is terminal.
     workflow.add_edge("auto_handle", END)
     workflow.add_edge("escalate", END)
     workflow.add_edge("human_review", END)
 
-    return workflow.compile()
+    # A checkpointer is REQUIRED for interrupt()/resume: it persists the paused
+    # state per thread_id so a resumed invoke can continue where it stopped.
+    # MemorySaver keeps checkpoints in memory (fine for a demo; swap for a durable
+    # backend in production).
+    return workflow.compile(checkpointer=MemorySaver())
