@@ -1,18 +1,21 @@
 """Demo runner — exercises the whole triage graph end to end.
 
-Run it with:
+Run the three-ticket demo:
 
     uv run python -m src.run
 
-It:
-1. Prints the active mode (mock vs real) and the graph topology (Mermaid).
-2. Feeds three tickets that hit all three routes: escalate, auto_handle, and the
-   human-in-the-loop pause.
-3. For the HITL ticket, shows the payload surfaced to the human and *simulates* a
-   human decision via `Command(resume=...)`.
-4. Prints the final action and the audit trail for each ticket.
+Or classify your own ticket:
+
+    uv run python -m src.run "the player buffers endlessly on 4K"
+
+Mode (mock vs real) is auto-selected: real mode uses the Anthropic API when
+ANTHROPIC_API_KEY is set (loaded from a local .env file), otherwise the
+deterministic mock classifier runs.
 """
 
+import sys
+
+from dotenv import load_dotenv
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
@@ -53,12 +56,37 @@ def run_ticket(
     return result
 
 
+def _print_result(result: dict) -> None:
+    """Print the final action and audit trail of one graph run."""
+    print(f"  ➡  final action: {result['action']}")
+    print("  📋 audit trail:")
+    for entry in result["audit_log"]:
+        print(f"       [{entry.node}] {entry.message}")
+
+
 def main() -> None:
+    # Load ANTHROPIC_API_KEY (and anything else) from a local .env before we read
+    # the environment to decide mock vs real mode.
+    load_dotenv()
+
     graph = build_graph()
 
     print("=" * 70)
     print(f"Support-ticket triage agent — mode: {active_mode().upper()}")
     print("=" * 70)
+
+    # A ticket passed on the command line runs just that one; otherwise the demo.
+    custom_ticket = " ".join(sys.argv[1:]).strip()
+    if custom_ticket:
+        # For a custom ticket we auto-approve if it pauses for human review, so a
+        # single command runs end to end. Change "auto_handle" to "escalate" to
+        # simulate the other human decision.
+        print("-" * 70)
+        print(f"custom ticket: {custom_ticket!r}")
+        result = run_ticket(graph, "custom", custom_ticket, "auto_handle")
+        _print_result(result)
+        print("-" * 70)
+        return
 
     print("\nGraph topology (Mermaid):\n")
     print(graph.get_graph().draw_mermaid())
@@ -67,11 +95,7 @@ def main() -> None:
         print("-" * 70)
         print(f"{thread_id}: {ticket_text!r}")
         result = run_ticket(graph, thread_id, ticket_text, human_decision)
-
-        print(f"  ➡  final action: {result['action']}")
-        print("  📋 audit trail:")
-        for entry in result["audit_log"]:
-            print(f"       [{entry.node}] {entry.message}")
+        _print_result(result)
 
     print("-" * 70)
 

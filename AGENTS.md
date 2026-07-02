@@ -39,6 +39,15 @@ START → classify → conditional routing → {auto_handle | escalate | human_r
 - **Real mode:** classification via the Anthropic API using model
   `claude-haiku-4-5-20251001` (Haiku = fast/cheap, well suited to high-volume
   triage). Ask for JSON, parse it, then validate with the **same** Pydantic schema.
+  Set the key in a local `.env` (copy `.env.example` → `.env`); it is loaded with
+  `python-dotenv` at startup.
+
+### Running
+
+```
+uv run python -m src.run                      # three-ticket demo (all paths)
+uv run python -m src.run "my ticket text"     # classify one custom ticket
+```
 
 ## Contribution conventions
 

@@ -6,18 +6,24 @@ Two interchangeable implementations share one contract:
 - `mock_classify`  : deterministic keyword matching, no network, no API key.
                      Builds a Classification directly (still schema-validated by
                      construction).
-- `real_classify`  : (stubbed for now) will call the Anthropic API, then route the
-                     JSON through `safe_parse` — implemented in a later step.
+- `real_classify`  : calls the Anthropic API (Haiku), asks for JSON, then routes
+                     that untrusted JSON through `safe_parse` (Guardrail #1).
 
 `get_classifier()` picks the implementation based on whether `ANTHROPIC_API_KEY`
 is set, so the rest of the system depends only on the *contract*, never on how a
 classification was produced.
 """
 
+import json
 import os
 from collections.abc import Callable
 
-from src.schema import Category, Classification, Severity
+import anthropic
+
+from src.schema import Category, Classification, Severity, safe_parse
+
+# Haiku 4.5: fast and cheap, well suited to high-volume triage.
+_MODEL = "claude-haiku-4-5-20251001"
 
 # A classifier is any callable that maps ticket text to a validated Classification.
 Classifier = Callable[[str], Classification]
@@ -95,16 +101,61 @@ def mock_classify(ticket_text: str) -> Classification:
     )
 
 
-def real_classify(ticket_text: str) -> Classification:
-    """Anthropic-backed classifier — implemented in a later step.
+def _build_system_prompt() -> str:
+    """Build the classifier instructions, injecting the allowlists from the enums.
 
-    Will prompt claude-haiku-4-5 for JSON, parse it, and run it through
-    `safe_parse` (Guardrail #1) so malformed model output is downgraded rather
-    than trusted.
+    Deriving the allowed values from the Enums (rather than hard-coding them)
+    keeps the prompt in sync with the schema: add a Category and the model is told
+    about it automatically.
     """
-    raise NotImplementedError(
-        "real_classify is stubbed; it will be implemented in the real-mode step."
+    categories = ", ".join(c.value for c in Category)
+    severities = ", ".join(s.value for s in Severity)
+    return (
+        "You are a support-ticket triage classifier for a video platform.\n"
+        "Classify the user's ticket and respond with ONLY a JSON object — no prose, "
+        "no markdown fences. The object must have exactly these keys:\n"
+        f'  "category": one of [{categories}]\n'
+        f'  "severity": one of [{severities}]\n'
+        '  "confidence": a number between 0 and 1 (your certainty)\n'
+        '  "rationale": a short string explaining the decision\n'
+        'Use "critical" severity only for outages, data loss, or platform-wide '
+        "failures."
     )
+
+
+def real_classify(ticket_text: str) -> Classification:
+    """Anthropic-backed classifier (Haiku).
+
+    Prompts the model for JSON, parses it, and routes the result through
+    `safe_parse` (Guardrail #1) so malformed model output is downgraded rather
+    than trusted. Any failure — network error, refusal, invalid JSON — is caught
+    and turned into the same safe low-confidence fallback, so a real-mode problem
+    routes a ticket to human review instead of crashing the graph.
+    """
+    # anthropic.Anthropic() reads ANTHROPIC_API_KEY from the environment.
+    client = anthropic.Anthropic()
+    try:
+        response = client.messages.create(
+            model=_MODEL,
+            max_tokens=512,
+            system=_build_system_prompt(),
+            messages=[{"role": "user", "content": ticket_text}],
+        )
+        if response.stop_reason == "refusal":
+            raise ValueError("model refused to classify the ticket")
+        # The response is a list of content blocks; take the first text block.
+        text = next(block.text for block in response.content if block.type == "text")
+        data = json.loads(text)
+    except Exception as exc:  # API error, refusal, or invalid JSON
+        return Classification(
+            category=Category.OTHER,
+            severity=Severity.LOW,
+            confidence=0.0,
+            rationale=f"Real-mode fallback ({type(exc).__name__}); routed to human review.",
+        )
+
+    # Untrusted model JSON crosses Guardrail #1 here.
+    return safe_parse(data)
 
 
 def active_mode() -> str:
