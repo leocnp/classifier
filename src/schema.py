@@ -46,6 +46,19 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+class Action(StrEnum):
+    """The routing outcome for a ticket — what the graph decided to do.
+
+    Values double as the node names they route to, so the router can return an
+    Action directly. Keeping this typed (instead of bare strings) makes the final
+    decision easy to inspect and serialize.
+    """
+
+    AUTO_HANDLE = "auto_handle"      # confident, non-critical -> handled automatically
+    ESCALATE = "escalate"           # critical, or otherwise needs a specialist
+    HUMAN_REVIEW = "human_review"   # low confidence -> a human decides
+
+
 class Classification(BaseModel):
     """A validated triage decision about a single support ticket.
 
