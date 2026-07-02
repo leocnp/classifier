@@ -18,13 +18,19 @@ from operator import add
 from typing import Annotated
 
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from src.classifier import active_mode, get_classifier
-from src.schema import Action, AuditEntry, Classification, Severity
+from src.schema import Action, AuditEntry, Category, Classification, Severity
+
+# Our custom types stored in checkpoints. Declaring them explicitly lets the
+# checkpointer's msgpack serializer deserialize them without the permissive
+# "unregistered type" warning (and keeps deserialization restricted to known types).
+_CHECKPOINT_TYPES = [Category, Severity, Action, Classification, AuditEntry]
 
 # Guardrail #2 threshold: below this confidence, defer to a human.
 CONFIDENCE_THRESHOLD = 0.6
@@ -192,5 +198,6 @@ def build_graph() -> CompiledStateGraph:
     # A checkpointer is REQUIRED for interrupt()/resume: it persists the paused
     # state per thread_id so a resumed invoke can continue where it stopped.
     # MemorySaver keeps checkpoints in memory (fine for a demo; swap for a durable
-    # backend in production).
-    return workflow.compile(checkpointer=MemorySaver())
+    # backend in production). We give it a serializer that knows our custom types.
+    serde = JsonPlusSerializer(allowed_msgpack_modules=_CHECKPOINT_TYPES)
+    return workflow.compile(checkpointer=MemorySaver(serde=serde))
